@@ -1,12 +1,12 @@
 # Clasroyale Replica
 
-A fan made mini Clash Royale clone that runs entirely in the browser. One HTML file, no dependencies, no build step, no server.
+A fan made mini Clash Royale clone that runs entirely in the browser, rendered in 3D with Three.js (loaded from a CDN). One HTML file, no build step, no server.
 
 ## Play
 
 Open `index.html` in any modern browser, or play the hosted version via GitHub Pages once enabled.
 
-All characters are original artwork drawn and animated procedurally on the canvas, walk cycles, attack swings, fire breath, muzzle flashes, no image assets and no extracted game files.
+All characters are original low poly 3D models built from geometric primitives and animated procedurally, walk cycles, attack swings, fire breath, muzzle flashes, real time shadows, no image assets and no extracted game files.
 
 ## How it works
 

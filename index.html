@@ -30,7 +30,7 @@
   #timer.double { color: #d774ff; }
   .crowns { min-width: 110px; }
   .crowns.right { text-align: right; }
-  canvas { border-radius: 8px; cursor: crosshair; display: block; max-width: 100vw; }
+  #arena3d canvas { border-radius: 8px; cursor: crosshair; display: block; max-width: 100vw; }
   #bottombar {
     width: 540px;
     max-width: 100vw;
@@ -97,7 +97,7 @@
     <div id="timer">3:00</div>
     <div class="crowns right" id="crowns-player">👑 0</div>
   </div>
-  <canvas id="arena" width="540" height="760"></canvas>
+  <div id="arena3d"></div>
   <div id="bottombar">
     <div id="cardrow">
       <div id="nextwrap"><div class="label">NEXT</div><div id="nextcard"></div></div>
@@ -115,22 +115,399 @@
     <button onclick="resetGame()">Play Again</button>
   </div>
 
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
 <script>
 "use strict";
 
+// logic space stays 540x760 (x right, y down toward the player); SCALE maps it onto the 3D ground plane
 const W = 540, H = 760;
 const RIVER_Y = H / 2;
 const RIVER_H = 44;
 const BRIDGES = [120, 420];
 const BRIDGE_W = 72;
+const SCALE = 0.07;
 
-const cv = document.getElementById("arena");
-const ctx = cv.getContext("2d");
-
-const TEAM = {
-  player: { main: "#3b6fd8", dark: "#26498f", trim: "#7fa8f0" },
-  enemy:  { main: "#d84343", dark: "#8f2626", trim: "#f08a7f" },
+const TEAMC = {
+  player: { main: 0x3b6fd8, dark: 0x26498f, bar: 0x4da3ff },
+  enemy:  { main: 0xd84343, dark: 0x8f2626, bar: 0xff5b5b },
 };
+
+function wx(x) { return (x - W / 2) * SCALE; }
+function wz(y) { return (y - H / 2) * SCALE; }
+
+// ---------------------------------------------------------------- three.js scene
+const VIEW_W = 540, VIEW_H = 760;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1c2c);
+
+const camera = new THREE.PerspectiveCamera(55, VIEW_W / VIEW_H, 0.5, 250);
+camera.position.set(0, 48, 57);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(VIEW_W, VIEW_H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.getElementById("arena3d").appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xbcc7e8, 0.75));
+const sun = new THREE.DirectionalLight(0xfff2d8, 1.5);
+sun.position.set(26, 60, 28);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -28; sun.shadow.camera.right = 28;
+sun.shadow.camera.top = 34; sun.shadow.camera.bottom = -34;
+sun.shadow.camera.near = 10; sun.shadow.camera.far = 140;
+scene.add(sun);
+
+// ---------------------------------------------------------------- mesh helpers
+function lam(color) { return new THREE.MeshLambertMaterial({ color }); }
+function glow(color, opacity) {
+  return new THREE.MeshBasicMaterial({ color, transparent: opacity !== undefined, opacity: opacity === undefined ? 1 : opacity });
+}
+function shadowed(m) { m.castShadow = true; return m; }
+function box(w, h, d, color, x, y, z) {
+  const m = shadowed(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), lam(color)));
+  m.position.set(x || 0, y || 0, z || 0);
+  return m;
+}
+function sph(r, color, x, y, z) {
+  const m = shadowed(new THREE.Mesh(new THREE.SphereGeometry(r, 14, 12), lam(color)));
+  m.position.set(x || 0, y || 0, z || 0);
+  return m;
+}
+function cyl(rt, rb, h, color, x, y, z) {
+  const m = shadowed(new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, 14), lam(color)));
+  m.position.set(x || 0, y || 0, z || 0);
+  return m;
+}
+function cone(r, h, color, x, y, z) {
+  const m = shadowed(new THREE.Mesh(new THREE.ConeGeometry(r, h, 12), lam(color)));
+  m.position.set(x || 0, y || 0, z || 0);
+  return m;
+}
+// a leg/arm hanging from a hip/shoulder pivot so it can swing
+function limb(r, len, color, x, pivotY, z) {
+  const grp = new THREE.Group();
+  grp.position.set(x, pivotY, z);
+  grp.add(box(r * 2, len, r * 2, color, 0, -len / 2, 0));
+  return grp;
+}
+function textSprite(txt) {
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const cc = c.getContext("2d");
+  cc.font = "bold 64px Segoe UI, Arial";
+  cc.fillStyle = "#ffffff";
+  cc.textAlign = "center";
+  cc.textBaseline = "middle";
+  cc.fillText(txt, 64, 64);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false }));
+  sp.scale.set(1.8, 1.8, 1);
+  sp.renderOrder = 50;
+  return sp;
+}
+
+// ---------------------------------------------------------------- arena ground
+{
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(W * SCALE + 7, H * SCALE + 7), lam(0x4f9e44));
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // mowing stripes
+  for (let i = 0; i < H / 80; i++) {
+    const s = new THREE.Mesh(
+      new THREE.PlaneGeometry(W * SCALE, 40 * SCALE),
+      new THREE.MeshLambertMaterial({ color: 0x000000, transparent: true, opacity: 0.07 })
+    );
+    s.rotation.x = -Math.PI / 2;
+    s.position.set(0, 0.01, wz(60 + i * 80));
+    scene.add(s);
+  }
+
+  const river = new THREE.Mesh(new THREE.PlaneGeometry(W * SCALE + 7, RIVER_H * SCALE), lam(0x3b6fd4));
+  river.rotation.x = -Math.PI / 2;
+  river.position.y = 0.02;
+  scene.add(river);
+
+  for (const bx of BRIDGES) {
+    const b = box(BRIDGE_W * SCALE, 0.22, (RIVER_H + 10) * SCALE, 0xb08a52, wx(bx), 0.11, 0);
+    b.receiveShadow = true;
+    scene.add(b);
+  }
+}
+
+// translucent highlight over the player's half while placing a troop
+const deployPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(W * SCALE, (H / 2 - RIVER_H / 2) * SCALE),
+  new THREE.MeshBasicMaterial({ color: 0x5096ff, transparent: true, opacity: 0.16, depthWrite: false })
+);
+deployPlane.rotation.x = -Math.PI / 2;
+deployPlane.position.set(0, 0.03, wz((RIVER_Y + RIVER_H / 2 + H) / 2));
+deployPlane.visible = false;
+scene.add(deployPlane);
+
+// ---------------------------------------------------------------- character builders (all face +X)
+function buildKnight(side) {
+  const T = TEAMC[side];
+  const g = new THREE.Group();
+  const legs = [limb(0.18, 0.7, 0x4a3b2a, -0.26, 0.7, 0), limb(0.18, 0.7, 0x4a3b2a, 0.26, 0.7, 0)];
+  legs.forEach(l => g.add(l));
+  g.add(cyl(0.52, 0.6, 1.05, T.main, 0, 1.25, 0));
+  g.add(cyl(0.58, 0.58, 0.16, T.dark, 0, 0.84, 0));            // belt
+  g.add(sph(0.4, 0xf1c27d, 0, 2.08, 0));                       // face
+  const helm = sph(0.46, 0x99a2b3, 0, 2.2, 0);                 // helmet dome
+  helm.scale.y = 0.72;
+  g.add(helm);
+  const arm = new THREE.Group();                               // sword arm
+  arm.position.set(0, 1.68, 0.6);
+  arm.add(cyl(0.12, 0.12, 0.55, T.main, 0, -0.28, 0));
+  arm.add(box(0.3, 0.08, 0.3, 0x7a5a30, 0, -0.56, 0));         // crossguard
+  arm.add(box(0.09, 1.0, 0.2, 0xd7dee9, 0, -1.1, 0));          // blade
+  arm.rotation.z = 0.3;
+  g.add(arm);
+  const shield = cyl(0.42, 0.42, 0.1, 0x8a6840, 0, 1.3, -0.66);
+  shield.rotation.x = Math.PI / 2;
+  g.add(shield);
+  g.userData = { legs, weaponArm: arm, armRest: 0.3, h: 2.7 };
+  return g;
+}
+
+function buildArcher(side) {
+  const T = TEAMC[side];
+  const g = new THREE.Group();
+  const legs = [limb(0.13, 0.6, 0x2e4d2e, -0.2, 0.6, 0), limb(0.13, 0.6, 0x2e4d2e, 0.2, 0.6, 0)];
+  legs.forEach(l => g.add(l));
+  g.add(cyl(0.4, 0.48, 0.92, T.main, 0, 1.05, 0));
+  g.add(sph(0.32, 0xf1c27d, 0, 1.75, 0));                      // face
+  g.add(cone(0.4, 0.62, 0x3f7a46, 0, 2.05, 0));                // hood
+  const bow = new THREE.Group();                               // held out front-right
+  bow.position.set(0.5, 1.3, 0.35);
+  const arc = shadowed(new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.045, 6, 14, Math.PI), lam(0x7a4f23)));
+  arc.rotation.y = Math.PI / 2;                                // bow plane perpendicular to shot
+  arc.rotation.z = -Math.PI / 2;
+  bow.add(arc);
+  g.add(bow);
+  g.userData = { legs, h: 2.3 };
+  return g;
+}
+
+function buildGiant(side) {
+  const T = TEAMC[side];
+  const g = new THREE.Group();
+  const legs = [limb(0.3, 0.85, 0x5b4632, -0.45, 0.85, 0), limb(0.3, 0.85, 0x5b4632, 0.45, 0.85, 0)];
+  legs.forEach(l => g.add(l));
+  const body = sph(1.05, 0xc89a66, 0, 1.9, 0);
+  body.scale.y = 1.12;
+  g.add(body);
+  g.add(cyl(1.07, 1.07, 0.32, T.main, 0, 1.62, 0));            // team belt
+  g.add(sph(0.55, 0xe8b984, 0, 3.15, 0));                      // head
+  g.add(sph(0.1, 0xa87b4d, 0.5, 3.12, 0));                     // nose
+  const armL = new THREE.Group();
+  armL.position.set(0, 2.5, -1.05);
+  armL.add(cyl(0.26, 0.26, 0.95, 0xc89a66, 0, -0.5, 0));
+  armL.add(sph(0.34, 0xe8b984, 0, -1.05, 0));
+  armL.rotation.z = 0.2;
+  g.add(armL);
+  const armR = new THREE.Group();                              // punching arm
+  armR.position.set(0, 2.5, 1.05);
+  armR.add(cyl(0.26, 0.26, 0.95, 0xc89a66, 0, -0.5, 0));
+  armR.add(sph(0.36, 0xe8b984, 0, -1.08, 0));
+  armR.rotation.z = 0.2;
+  g.add(armR);
+  g.userData = { legs, weaponArm: armR, armRest: 0.2, h: 3.9 };
+  return g;
+}
+
+function buildMiniPekka(side) {
+  const T = TEAMC[side];
+  const g = new THREE.Group();
+  const legs = [limb(0.19, 0.62, 0x14172a, -0.28, 0.62, 0), limb(0.19, 0.62, 0x14172a, 0.28, 0.62, 0)];
+  legs.forEach(l => g.add(l));
+  g.add(box(0.95, 1.0, 0.8, 0x23263c, 0, 1.15, 0));
+  g.add(box(0.34, 0.18, 0.82, T.main, 0, 0.72, 0));            // team trim
+  g.add(box(0.62, 0.55, 0.68, 0x2b2f49, 0, 1.95, 0));          // head
+  g.add(cone(0.11, 0.55, 0xcdd6e6, 0, 2.5, 0));                // horn
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), glow(0x56c8ff));
+  eye.position.set(0.33, 1.95, 0);
+  g.add(eye);
+  const arm = new THREE.Group();                               // cleaver arm
+  arm.position.set(0, 1.62, 0.55);
+  arm.add(cyl(0.13, 0.13, 0.5, 0x23263c, 0, -0.25, 0));
+  arm.add(box(0.16, 1.05, 0.5, 0xaeb9cc, 0, -1.0, 0.08));      // huge blade
+  arm.rotation.z = 0.3;
+  g.add(arm);
+  g.userData = { legs, weaponArm: arm, armRest: 0.3, h: 2.8 };
+  return g;
+}
+
+function buildMusketeer(side) {
+  const T = TEAMC[side];
+  const g = new THREE.Group();
+  const legs = [limb(0.15, 0.65, 0x3a3050, -0.22, 0.65, 0), limb(0.15, 0.65, 0x3a3050, 0.22, 0.65, 0)];
+  legs.forEach(l => g.add(l));
+  g.add(cyl(0.44, 0.55, 1.0, T.main, 0, 1.18, 0));
+  g.add(sph(0.34, 0xf1c27d, 0, 1.92, 0));                      // face
+  g.add(cyl(0.6, 0.6, 0.07, 0x3a3050, 0, 2.14, 0));            // hat brim
+  g.add(cyl(0.28, 0.33, 0.32, 0x4a3f66, 0, 2.32, 0));          // hat crown
+  const arm = new THREE.Group();                               // musket arm
+  arm.position.set(0, 1.55, 0.5);
+  const musket = box(1.55, 0.1, 0.1, 0x6b4a26, 0.62, -0.22, 0);
+  arm.add(musket);
+  arm.add(box(0.7, 0.13, 0.13, 0x9aa3b2, 1.1, -0.22, 0));      // barrel
+  const flash = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), glow(0xfff3c4, 0.95));
+  flash.position.set(1.55, -0.22, 0);
+  flash.visible = false;
+  arm.add(flash);
+  g.add(arm);
+  g.userData = { legs, weaponArm: arm, armRest: 0, attackSwing: 0.25, flash, h: 2.7 };
+  return g;
+}
+
+function buildSkeleton(side) {
+  const g = new THREE.Group();
+  const legs = [limb(0.09, 0.5, 0xe8e8dc, -0.17, 0.5, 0), limb(0.09, 0.5, 0xe8e8dc, 0.17, 0.5, 0)];
+  legs.forEach(l => g.add(l));
+  const body = sph(0.42, 0xf2f2ea, 0, 0.95, 0);
+  body.scale.y = 1.1;
+  g.add(body);
+  g.add(sph(0.3, 0xf2f2ea, 0, 1.66, 0));                       // skull
+  const eL = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 6), glow(0x26222b));
+  eL.position.set(0.25, 1.72, -0.11);
+  const eR = eL.clone();
+  eR.position.z = 0.11;
+  g.add(eL); g.add(eR);
+  const arm = new THREE.Group();                               // bone club
+  arm.position.set(0, 1.3, 0.36);
+  arm.add(cyl(0.05, 0.05, 0.72, 0xe8e8dc, 0, -0.36, 0));
+  arm.add(sph(0.09, 0xe8e8dc, 0.06, -0.72, 0));
+  arm.add(sph(0.09, 0xe8e8dc, -0.06, -0.72, 0));
+  arm.rotation.z = 0.3;
+  g.add(arm);
+  g.scale.setScalar(0.85);
+  g.userData = { legs, weaponArm: arm, armRest: 0.3, h: 1.9 };
+  return g;
+}
+
+function buildBabyDragon(side) {
+  const g = new THREE.Group();
+  const body = sph(0.8, 0x69b35e, 0, 0.85, 0);
+  g.add(body);
+  const belly = sph(0.52, 0xb9e0a8, 0.38, 0.62, 0);
+  belly.scale.set(0.85, 1, 1);
+  g.add(belly);
+  g.add(sph(0.17, 0xffffff, 0.55, 1.22, -0.27));               // eyes
+  g.add(sph(0.17, 0xffffff, 0.55, 1.22, 0.27));
+  const pL = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 6), glow(0x26222b));
+  pL.position.set(0.68, 1.24, -0.27);
+  const pR = pL.clone();
+  pR.position.z = 0.27;
+  g.add(pL); g.add(pR);
+  g.add(sph(0.22, 0x4f9447, 0.74, 0.9, 0));                    // snout
+  g.add(cone(0.09, 0.3, 0x3d7a36, -0.3, 1.62, -0.25));         // horns
+  g.add(cone(0.09, 0.3, 0x3d7a36, -0.3, 1.62, 0.25));
+  const wingL = new THREE.Group();
+  wingL.position.set(-0.15, 1.15, -0.45);
+  wingL.add(box(0.65, 0.06, 1.05, 0x96d7a0, 0, 0, -0.62));
+  g.add(wingL);
+  const wingR = new THREE.Group();
+  wingR.position.set(-0.15, 1.15, 0.45);
+  wingR.add(box(0.65, 0.06, 1.05, 0x96d7a0, 0, 0, 0.62));
+  g.add(wingR);
+  const fire = new THREE.Mesh(new THREE.ConeGeometry(0.38, 1.5, 10), glow(0xff8c28, 0.8));
+  fire.rotation.z = -Math.PI / 2;                              // cone points +X
+  fire.position.set(1.75, 0.85, 0);
+  fire.visible = false;
+  g.add(fire);
+  g.userData = { wings: [wingL, wingR], fireCone: fire, h: 2.3 };
+  return g;
+}
+
+const BUILDERS = {
+  knight: buildKnight, archers: buildArcher, giant: buildGiant, minipekka: buildMiniPekka,
+  musketeer: buildMusketeer, skeletons: buildSkeleton, babydragon: buildBabyDragon,
+};
+
+function buildTowerMesh(t) {
+  const T = TEAMC[t.side];
+  const g = new THREE.Group();
+  const r = t.king ? 2.3 : 1.85, h = t.king ? 4.3 : 3.5;
+  const bodyM = cyl(r, r * 1.15, h, 0x9aa0ad, 0, h / 2, 0);
+  bodyM.receiveShadow = true;
+  g.add(bodyM);
+  g.add(cyl(r * 1.12, r * 1.12, 0.5, 0x7e8492, 0, h + 0.22, 0)); // parapet
+  g.add(cone(r * 0.95, t.king ? 1.7 : 1.4, T.main, 0, h + 1.25, 0)); // roof
+  if (t.king) {
+    const crown = new THREE.Group();
+    crown.add(cyl(0.55, 0.55, 0.3, 0xffd34d, 0, 0, 0));
+    for (const a of [0, 2.09, 4.19]) crown.add(cone(0.13, 0.42, 0xffd34d, Math.cos(a) * 0.42, 0.34, Math.sin(a) * 0.42));
+    crown.position.set(0, h + 2.25, 0);
+    g.add(crown);
+    const zz = textSprite("Zz");
+    zz.position.set(1.2, h + 3.4, 0);
+    g.add(zz);
+    g.userData.zz = zz;
+  }
+  g.userData.h = h + 2.4;
+  return g;
+}
+
+// ---------------------------------------------------------------- floating HP bars
+function makeBars(e, width) {
+  const grp = new THREE.Group();
+  const bg = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0x10121c, transparent: true, opacity: 0.75, depthTest: false }));
+  const fill = new THREE.Sprite(new THREE.SpriteMaterial({ color: TEAMC[e.side].bar, depthTest: false }));
+  bg.scale.set(width, 0.3, 1);
+  fill.scale.set(width * 0.94, 0.18, 1);
+  bg.renderOrder = 98;
+  fill.renderOrder = 99;
+  grp.add(bg);
+  grp.add(fill);
+  grp.userData = { fill, w: width * 0.94 };
+  scene.add(grp);
+  e.barGrp = grp;
+}
+
+function removeEntity(e) {
+  if (e.mesh) scene.remove(e.mesh);
+  if (e.barGrp) scene.remove(e.barGrp);
+}
+
+// ---------------------------------------------------------------- effects & projectiles
+let effects = [];
+function spawnBlast(x, y, r, color) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, 12, 10), glow(color, 0.55));
+  m.position.set(wx(x), 1.0, wz(y));
+  scene.add(m);
+  effects.push({ mesh: m, life: 0.35, maxLife: 0.35, grow: 3.2, baseOp: 0.55 });
+}
+function spawnRing(x, y, color) {
+  const m = new THREE.Mesh(new THREE.TorusGeometry(0.8, 0.07, 6, 24), glow(color, 0.85));
+  m.rotation.x = Math.PI / 2;
+  m.position.set(wx(x), 0.1, wz(y));
+  scene.add(m);
+  effects.push({ mesh: m, life: 0.4, maxLife: 0.4, grow: 4.5, baseOp: 0.85 });
+}
+
+let projectiles = [];
+function projMesh(kind) {
+  switch (kind) {
+    case "arrow": {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.85), glow(0xc8a06a));
+      return m; // long axis +Z so lookAt() aims it
+    }
+    case "fire": return new THREE.Mesh(new THREE.SphereGeometry(0.3, 10, 8), glow(0xff8c28));
+    case "bolt": return new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), glow(0xcfe4ff));
+    default:     return new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), glow(0xffd34d));
+  }
+}
+function spawnProjectile(x, y, target, dmg, speed, kind) {
+  const mesh = projMesh(kind);
+  scene.add(mesh);
+  projectiles.push({ x, y, target, dmg, speed, kind, mesh });
+}
 
 // ---------------------------------------------------------------- card data
 // speed in px/s, range in px past combined radii, hitSpeed in seconds/attack
@@ -147,12 +524,12 @@ const CARDS = {
 const TOWER_SPELL_FACTOR = 0.4; // spells deal reduced damage to towers
 
 // ---------------------------------------------------------------- state
-let units, towers, projectiles, effects;
+let units = [], towers = [];
 let player, enemy;
 let selectedSlot, timeLeft, overtime, gameOver;
 let aiThink;
 let lastTs = null;
-let gt = 0; // global clock for ambient animation
+let gt = 0;
 
 function shuffled(arr) {
   const a = arr.slice();
@@ -164,7 +541,7 @@ function shuffled(arr) {
 }
 
 function makeTower(side, x, y, king) {
-  return {
+  const t = {
     tower: true, king, side, x, y,
     radius: king ? 34 : 26,
     hp: king ? 2600 : 1500, maxHp: king ? 2600 : 1500,
@@ -172,9 +549,20 @@ function makeTower(side, x, y, king) {
     cooldown: 0, active: !king, // king wakes when damaged or a princess tower falls
     flying: false, targetsAir: true,
   };
+  t.mesh = buildTowerMesh(t);
+  t.mesh.position.set(wx(x), 0, wz(y));
+  scene.add(t.mesh);
+  makeBars(t, 3.4);
+  return t;
 }
 
 function resetGame() {
+  for (const arr of [units, towers, projectiles, effects]) {
+    for (const o of arr) {
+      if (o.mesh) scene.remove(o.mesh);
+      if (o.barGrp) scene.remove(o.barGrp);
+    }
+  }
   units = []; projectiles = []; effects = [];
   towers = [
     makeTower("enemy", BRIDGES[0], 130, false),
@@ -204,7 +592,7 @@ function spawnCard(side, key, x, y) {
   for (let i = 0; i < c.count; i++) {
     const off = c.count === 1 ? 0 : (i - (c.count - 1) / 2) * (c.radius * 2 + 6);
     const ux = Math.max(16, Math.min(W - 16, x + off));
-    units.push({
+    const u = {
       side, key,
       x: ux, y,
       hp: c.hp, maxHp: c.hp,
@@ -214,15 +602,19 @@ function spawnCard(side, key, x, y) {
       target: null, retarget: 0,
       facing: side === "player" ? -Math.PI / 2 : Math.PI / 2,
       walkPhase: Math.random() * 6, attackT: 0, moving: false,
-    });
-    effects.push({ x: ux, y, r: c.radius + 12, life: 0.35, maxLife: 0.35, color: "170,210,255", ring: true });
+    };
+    u.mesh = BUILDERS[key](side);
+    scene.add(u.mesh);
+    makeBars(u, 1.7);
+    units.push(u);
+    spawnRing(ux, y, 0xaad2ff);
   }
 }
 
 function castFireball(side, x, y) {
   const c = CARDS.fireball;
-  effects.push({ x, y, r: c.blast, life: 0.45, maxLife: 0.45, color: "255,120,30" });
-  effects.push({ x, y, r: c.blast + 14, life: 0.4, maxLife: 0.4, color: "255,200,80", ring: true });
+  spawnBlast(x, y, 2.0, 0xff7820);
+  spawnRing(x, y, 0xffc850);
   for (const u of units) {
     if (u.side !== side && Math.hypot(u.x - x, u.y - y) <= c.blast + u.radius) damage(u, c.dmg);
   }
@@ -235,7 +627,7 @@ function damage(e, amount) {
   e.hp -= amount;
   if (e.tower && e.king) e.active = true;
   if (e.hp > 0) return;
-  effects.push({ x: e.x, y: e.y, r: e.radius + 10, life: 0.3, maxLife: 0.3, color: "255,255,255" });
+  spawnBlast(e.x, e.y, e.tower ? 2.4 : 0.8, e.tower ? 0xc89a66 : 0xffffff);
   if (!e.tower) return;
   // tower destroyed: award crowns, wake the king
   const winner = e.side === "enemy" ? player : enemy;
@@ -334,7 +726,7 @@ function update(dt) {
         u.attackT = 1;
         if (u.range > 30) {
           const kind = u.key === "archers" ? "arrow" : u.key === "babydragon" ? "fire" : "bullet";
-          projectiles.push({ x: u.x, y: u.y, target: u.target, dmg: u.dmg, speed: 330, kind });
+          spawnProjectile(u.x, u.y, u.target, u.dmg, 330, kind);
         } else {
           damage(u.target, u.dmg);
         }
@@ -345,7 +737,10 @@ function update(dt) {
       u.moving = true;
     }
   }
-  units = units.filter(u => u.hp > 0);
+  units = units.filter(u => {
+    if (u.hp <= 0) { removeEntity(u); return false; }
+    return true;
+  });
 
   // towers
   for (const t of towers) {
@@ -360,10 +755,13 @@ function update(dt) {
     }
     if (best) {
       t.cooldown = t.hitSpeed;
-      projectiles.push({ x: t.x, y: t.y, target: best, dmg: t.dmg, speed: 380, kind: "bolt" });
+      spawnProjectile(t.x, t.y, best, t.dmg, 380, "bolt");
     }
   }
-  towers = towers.filter(t => t.hp > 0);
+  towers = towers.filter(t => {
+    if (t.hp <= 0) { removeEntity(t); return false; }
+    return true;
+  });
 
   // projectiles
   for (const p of projectiles) {
@@ -373,17 +771,17 @@ function update(dt) {
     if (d <= step + p.target.radius) {
       damage(p.target, p.dmg);
       p.done = true;
-      if (gameOver) return;
+      if (gameOver) break;
     } else {
       p.x += (p.target.x - p.x) / d * step;
       p.y += (p.target.y - p.y) / d * step;
     }
   }
-  projectiles = projectiles.filter(p => !p.done);
-
-  // effects
-  for (const f of effects) f.life -= dt;
-  effects = effects.filter(f => f.life > 0);
+  projectiles = projectiles.filter(p => {
+    if (p.done) { scene.remove(p.mesh); return false; }
+    return true;
+  });
+  if (gameOver) return;
 
   // enemy AI
   aiThink -= dt;
@@ -459,11 +857,22 @@ function renderHand() {
     `<div class="card mini"><div class="cost">${n.cost}</div><div class="emoji">${n.emoji}</div></div>`;
 }
 
-cv.addEventListener("click", ev => {
+const raycaster = new THREE.Raycaster();
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const hitPoint = new THREE.Vector3();
+
+renderer.domElement.addEventListener("click", ev => {
   if (gameOver || selectedSlot < 0) return;
-  const r = cv.getBoundingClientRect();
-  const x = (ev.clientX - r.left) * (W / r.width);
-  const y = (ev.clientY - r.top) * (H / r.height);
+  const r = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((ev.clientX - r.left) / r.width) * 2 - 1,
+    -((ev.clientY - r.top) / r.height) * 2 + 1
+  );
+  raycaster.setFromCamera(ndc, camera);
+  if (!raycaster.ray.intersectPlane(groundPlane, hitPoint)) return;
+  const x = hitPoint.x / SCALE + W / 2;
+  const y = hitPoint.z / SCALE + H / 2;
+  if (x < 0 || x > W || y < 0 || y > H) return;
   const key = player.hand[selectedSlot];
   const c = CARDS[key];
   if (player.elixir < c.cost) return;
@@ -488,384 +897,74 @@ document.addEventListener("keydown", ev => {
   }
 });
 
-// ---------------------------------------------------------------- drawing helpers
-function circle(x, y, rad, fill, stroke, lw) {
-  ctx.beginPath();
-  ctx.arc(x, y, rad, 0, Math.PI * 2);
-  ctx.fillStyle = fill;
-  ctx.fill();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 1.5; ctx.stroke(); }
-}
+// ---------------------------------------------------------------- visual sync (runs every frame, even after game over)
+function syncVisuals(dt) {
+  deployPlane.visible = !gameOver && selectedSlot >= 0 && !CARDS[player.hand[selectedSlot]].spell;
 
-function ell(x, y, rx, ry, rot, fill) {
-  ctx.beginPath();
-  ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2);
-  ctx.fillStyle = fill;
-  ctx.fill();
-}
-
-function poly(points, fill, stroke, lw) {
-  ctx.beginPath();
-  ctx.moveTo(points[0][0], points[0][1]);
-  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 1.5; ctx.stroke(); }
-}
-
-function rrect(x, y, w, h, rad, fill, stroke, lw) {
-  ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(x, y, w, h, rad);
-  else ctx.rect(x, y, w, h);
-  ctx.fillStyle = fill;
-  ctx.fill();
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 2; ctx.stroke(); }
-}
-
-function drawCrown(x, y, s, fill, stroke) {
-  poly([
-    [x - s, y + s * 0.55], [x - s, y - s * 0.25], [x - s * 0.5, y + s * 0.05],
-    [x, y - s * 0.6], [x + s * 0.5, y + s * 0.05], [x + s, y - s * 0.25],
-    [x + s, y + s * 0.55],
-  ], fill, stroke, 1.5);
-}
-
-function drawLegs(u, color) {
-  const step = u.moving ? Math.sin(u.walkPhase * 2) * 3 : 0;
-  ell(-u.radius * 0.38, u.radius * 0.82 + step * 0.5, 3.2, 4.2, 0, color);
-  ell(u.radius * 0.38, u.radius * 0.82 - step * 0.5, 3.2, 4.2, 0, color);
-}
-
-function eyes(cy, dx, rad) {
-  ctx.fillStyle = "#26222b";
-  ctx.beginPath(); ctx.arc(-dx, cy, rad, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(dx, cy, rad, 0, Math.PI * 2); ctx.fill();
-}
-
-// ---------------------------------------------------------------- characters
-function drawUnit(u) {
-  const T = TEAM[u.side];
-  const r = u.radius;
-  const bob = u.moving ? Math.sin(u.walkPhase * 2) * 1.6 : 0;
-  const lunge = u.attackT * 5;
-  const fx = Math.cos(u.facing), fy = Math.sin(u.facing);
-  // weapon swing angle: sweeps through the target during an attack, rests otherwise
-  const swing = u.attackT > 0 ? Math.sin(u.attackT * Math.PI) * 1.1 - 0.45 : 0.5;
-
-  ctx.save();
-  ctx.translate(u.x + fx * lunge, u.y + fy * lunge);
-
-  // shadow
-  ell(0, u.flying ? r + 9 : r * 0.85, r * 0.9, r * 0.38, 0, "rgba(0,0,0,0.25)");
-
-  if (u.flying) ctx.translate(0, -7 + Math.sin(gt * 4 + u.walkPhase) * 2);
-  ctx.translate(0, bob * 0.5);
-
-  switch (u.key) {
-
-    case "knight": {
-      drawLegs(u, "#4a3b2a");
-      circle(0, 0, r, T.main, T.dark, 2);                       // armored chest
-      ell(0, r * 0.25, r * 0.8, r * 0.3, 0, T.dark);            // belt
-      circle(0, -r * 0.5, r * 0.6, "#f1c27d");                  // face
-      ctx.fillStyle = "#99a2b3";                                // helmet
-      ctx.beginPath(); ctx.arc(0, -r * 0.58, r * 0.65, Math.PI, 0); ctx.fill();
-      ctx.fillRect(-r * 0.65, -r * 0.62, r * 1.3, r * 0.16);
-      eyes(-r * 0.4, r * 0.24, 1.4);
-      // sword sweeps toward facing
-      ctx.save();
-      ctx.rotate(u.facing + swing);
-      ctx.translate(r * 0.85, 0);
-      poly([[0, -2.2], [r * 1.15, -1.4], [r * 1.3, 0], [r * 1.15, 1.4], [0, 2.2]], "#d7dee9", "#8b94a5", 1);
-      ctx.fillStyle = "#7a5a30";
-      ctx.fillRect(-5, -3.4, 6, 6.8);                           // hilt
-      ctx.restore();
-      // shield on off-hand
-      ctx.save();
-      ctx.rotate(u.facing - 1.7);
-      circle(r * 0.85, 0, r * 0.42, "#8a6840", "#5c4528", 1.5);
-      ctx.restore();
-      break;
+  for (const u of units) {
+    const ud = u.mesh.userData;
+    const lunge = u.attackT * 0.4;
+    let y = 0;
+    if (u.flying) y = 2.1 + Math.sin(gt * 4 + u.walkPhase) * 0.22;
+    else if (u.moving) y = Math.abs(Math.sin(u.walkPhase * 2)) * 0.09;
+    u.mesh.position.set(
+      wx(u.x) + Math.cos(u.facing) * lunge,
+      y,
+      wz(u.y) + Math.sin(u.facing) * lunge
+    );
+    u.mesh.rotation.y = -u.facing;
+    const swing = u.moving ? Math.sin(u.walkPhase * 2) * 0.55 : 0;
+    if (ud.legs) {
+      ud.legs[0].rotation.z = swing;
+      ud.legs[1].rotation.z = -swing;
     }
-
-    case "archers": {
-      drawLegs(u, "#2e4d2e");
-      circle(0, 0, r, T.main, T.dark, 2);                       // tunic
-      circle(0, -r * 0.48, r * 0.62, "#f1c27d");                // face
-      ctx.fillStyle = "#3f7a46";                                // hood
-      ctx.beginPath(); ctx.arc(0, -r * 0.52, r * 0.7, Math.PI * 0.85, Math.PI * 2.15); ctx.fill();
-      poly([[0, -r * 1.45], [-r * 0.3, -r * 0.95], [r * 0.3, -r * 0.95]], "#3f7a46"); // hood point
-      eyes(-r * 0.42, r * 0.22, 1.2);
-      // bow held toward facing, string pulls back while attacking
-      ctx.save();
-      ctx.rotate(u.facing);
-      ctx.translate(r * 0.95, 0);
-      ctx.strokeStyle = "#7a4f23"; ctx.lineWidth = 2.4;
-      ctx.beginPath(); ctx.arc(0, 0, r * 0.85, -1.15, 1.15); ctx.stroke();
-      const tipX = Math.cos(1.15) * r * 0.85, tipY = Math.sin(1.15) * r * 0.85;
-      const pull = u.attackT > 0 ? -r * 0.55 * u.attackT : tipX;
-      ctx.strokeStyle = "#e8e8e8"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(tipX, -tipY); ctx.lineTo(pull, 0); ctx.lineTo(tipX, tipY); ctx.stroke();
-      if (u.attackT > 0.4) {                                    // nocked arrow
-        ctx.strokeStyle = "#9c6b34"; ctx.lineWidth = 1.8;
-        ctx.beginPath(); ctx.moveTo(pull, 0); ctx.lineTo(r * 0.95, 0); ctx.stroke();
-      }
-      ctx.restore();
-      break;
+    if (ud.weaponArm) {
+      const amp = ud.attackSwing !== undefined ? ud.attackSwing : 1.25;
+      ud.weaponArm.rotation.z = ud.armRest + Math.sin(u.attackT * Math.PI) * amp;
     }
-
-    case "giant": {
-      drawLegs(u, "#5b4632");
-      circle(0, 0, r, "#c89a66", "#8a6840", 2.5);               // huge torso
-      poly([[-r * 0.95, -r * 0.3], [r * 0.4, r * 0.85], [r * 0.75, r * 0.45], [-r * 0.6, -r * 0.75]], T.main); // team sash
-      circle(0, -r * 0.42, r * 0.52, "#e8b984", "#8a6840", 1.5); // head
-      eyes(-r * 0.5, r * 0.18, 1.6);
-      ctx.strokeStyle = "#6e5230"; ctx.lineWidth = 2;            // heavy brow
-      ctx.beginPath(); ctx.moveTo(-r * 0.34, -r * 0.62); ctx.lineTo(r * 0.34, -r * 0.62); ctx.stroke();
-      ell(0, -r * 0.22, r * 0.16, r * 0.1, 0, "#a87b4d");        // nose
-      // fists; the leading one punches forward
-      ctx.save();
-      ctx.rotate(u.facing);
-      const punch = u.attackT * r * 0.55;
-      circle(r * 0.7, -r * 0.6, r * 0.3, "#e8b984", "#8a6840", 1.5);
-      circle(r * 0.7 + punch, r * 0.6, r * 0.34, "#e8b984", "#8a6840", 1.5);
-      ctx.restore();
-      break;
+    if (ud.wings) {
+      const f = Math.sin(gt * 10 + u.walkPhase) * 0.45;
+      ud.wings[0].rotation.x = f;
+      ud.wings[1].rotation.x = -f;
     }
-
-    case "minipekka": {
-      drawLegs(u, "#14172a");
-      circle(0, 0, r, "#23263c", "#0d0f1a", 2);                 // dark armor
-      poly([[0, -r * 1.45], [-r * 0.2, -r * 0.6], [r * 0.2, -r * 0.6]], "#cdd6e6", "#8b94a5", 1); // horn
-      circle(0, -r * 0.32, r * 0.42, "rgba(86,200,255,0.25)");  // eye glow halo
-      circle(0, -r * 0.32, r * 0.24, "#56c8ff");                // single eye
-      ell(0, r * 0.35, r * 0.6, r * 0.22, 0, T.main);           // team stripe
-      // oversized cleaver
-      ctx.save();
-      ctx.rotate(u.facing + swing);
-      ctx.translate(r * 0.75, 0);
-      poly([[0, -3], [r * 1.05, -7], [r * 1.45, -2], [r * 1.4, 5], [0, 3.5]], "#aeb9cc", "#6f7a8d", 1.2);
-      ctx.fillStyle = "#3c3325";
-      ctx.fillRect(-6, -3, 7, 6);                               // grip
-      ctx.restore();
-      break;
+    if (ud.flash) ud.flash.visible = u.attackT > 0.62;
+    if (ud.fireCone) {
+      ud.fireCone.visible = u.attackT > 0.3;
+      ud.fireCone.material.opacity = u.attackT * 0.8;
+      const s = 0.6 + u.attackT * 0.6;
+      ud.fireCone.scale.set(s, s, s);
     }
-
-    case "musketeer": {
-      drawLegs(u, "#3a3050");
-      circle(0, 0, r, T.main, T.dark, 2);                       // coat
-      circle(0, -r * 0.5, r * 0.56, "#f1c27d");                 // face
-      eyes(-r * 0.46, r * 0.2, 1.2);
-      ell(0, -r * 0.82, r * 0.85, r * 0.26, 0, "#3a3050");      // hat brim
-      circle(0, -r * 0.98, r * 0.4, "#4a3f66");                 // hat crown
-      circle(r * 0.55, -r * 0.95, r * 0.14, "#e6c84a");         // hat feather pin
-      // musket along facing, muzzle flash right after firing
-      ctx.save();
-      ctx.rotate(u.facing);
-      ctx.fillStyle = "#6b4a26";
-      ctx.fillRect(r * 0.15, 1.5, r * 1.45, 3.6);               // stock
-      ctx.fillStyle = "#9aa3b2";
-      ctx.fillRect(r * 1.0, 2.1, r * 0.95, 2.4);                // barrel
-      if (u.attackT > 0.62) {
-        circle(r * 2.05, 3.3, 4.5 * u.attackT, "rgba(255,210,90,0.9)");
-        circle(r * 2.05, 3.3, 2.2 * u.attackT, "#fff3c4");
-      }
-      ctx.restore();
-      break;
-    }
-
-    case "skeletons": {
-      drawLegs(u, "#e8e8dc");
-      circle(0, 0, r, "#f2f2ea", "#b9b9a8", 1.5);               // bony body
-      ctx.strokeStyle = "#b9b9a8"; ctx.lineWidth = 1.4;          // ribs
-      ctx.beginPath(); ctx.moveTo(-r * 0.5, r * 0.15); ctx.lineTo(r * 0.5, r * 0.15); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(-r * 0.4, r * 0.45); ctx.lineTo(r * 0.4, r * 0.45); ctx.stroke();
-      circle(-r * 0.3, -r * 0.25, 1.9, "#26222b");              // eye sockets
-      circle(r * 0.3, -r * 0.25, 1.9, "#26222b");
-      ctx.strokeStyle = "#26222b"; ctx.lineWidth = 1;            // grin
-      ctx.beginPath(); ctx.moveTo(-r * 0.3, r * 0.05); ctx.lineTo(r * 0.3, r * 0.05); ctx.stroke();
-      // little bone club
-      ctx.save();
-      ctx.rotate(u.facing + swing);
-      ctx.translate(r * 0.7, 0);
-      ctx.strokeStyle = "#e8e8dc"; ctx.lineWidth = 2.6;
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(r * 0.9, 0); ctx.stroke();
-      circle(r * 0.95, -1.5, 2, "#e8e8dc");
-      circle(r * 0.95, 1.5, 2, "#e8e8dc");
-      ctx.restore();
-      break;
-    }
-
-    case "babydragon": {
-      const flap = Math.sin(gt * 9 + u.walkPhase) * 0.45;
-      ell(-r * 0.95, -r * 0.15, r * 0.72, r * 0.34, -0.5 - flap, "rgba(150,215,160,0.95)"); // wings
-      ell(r * 0.95, -r * 0.15, r * 0.72, r * 0.34, 0.5 + flap, "rgba(150,215,160,0.95)");
-      circle(0, 0, r, "#69b35e", "#3d7a36", 2);                 // round body
-      ell(0, r * 0.3, r * 0.55, r * 0.4, 0, "#b9e0a8");         // belly
-      poly([[-r * 0.4, -r * 0.95], [-r * 0.55, -r * 0.45], [-r * 0.25, -r * 0.55]], "#3d7a36"); // horns
-      poly([[r * 0.4, -r * 0.95], [r * 0.55, -r * 0.45], [r * 0.25, -r * 0.55]], "#3d7a36");
-      circle(-r * 0.28, -r * 0.3, r * 0.22, "#fff");            // big eyes
-      circle(r * 0.28, -r * 0.3, r * 0.22, "#fff");
-      circle(-r * 0.24, -r * 0.28, r * 0.1, "#26222b");
-      circle(r * 0.24, -r * 0.28, r * 0.1, "#26222b");
-      ell(0, r * 0.05, r * 0.3, r * 0.18, 0, "#4f9447");        // snout
-      // fire breath cone while attacking
-      if (u.attackT > 0.3) {
-        ctx.save();
-        ctx.rotate(u.facing);
-        const fl = u.attackT;
-        poly([[r * 0.8, 0], [r * 2.3, -r * 0.55], [r * 2.5, 0], [r * 2.3, r * 0.55]], `rgba(255,140,40,${0.55 * fl})`);
-        poly([[r * 0.9, 0], [r * 1.9, -r * 0.3], [r * 2.05, 0], [r * 1.9, r * 0.3]], `rgba(255,220,90,${0.7 * fl})`);
-        ctx.restore();
-      }
-      break;
+    // floating HP bar, shown once damaged
+    u.barGrp.visible = u.hp < u.maxHp;
+    if (u.barGrp.visible) {
+      u.barGrp.position.set(wx(u.x), (u.flying ? 2.1 : 0) + ud.h + 0.55, wz(u.y));
+      u.barGrp.userData.fill.scale.x = Math.max(0.01, u.barGrp.userData.w * (u.hp / u.maxHp));
     }
   }
 
-  ctx.restore();
-  if (u.hp < u.maxHp) drawHpBar(u);
-}
-
-// ---------------------------------------------------------------- towers & projectiles
-function drawTower(t) {
-  const T = TEAM[t.side];
-  const r = t.radius;
-  ctx.save();
-  ctx.translate(t.x, t.y);
-
-  ell(0, r * 0.55, r * 1.05, r * 0.4, 0, "rgba(0,0,0,0.2)");    // shadow
-  rrect(-r, -r, r * 2, r * 2, 6, "#9aa0ad", "#5d626e", 2.5);    // stone body
-  ctx.fillStyle = "#7e8492";                                    // battlements
-  for (const i of [-1, 0, 1]) ctx.fillRect(i * r * 0.66 - r * 0.17, -r - 5, r * 0.34, 7);
-  ctx.strokeStyle = "rgba(0,0,0,0.12)"; ctx.lineWidth = 1;       // brick seams
-  ctx.beginPath();
-  ctx.moveTo(-r, -r * 0.33); ctx.lineTo(r, -r * 0.33);
-  ctx.moveTo(-r, r * 0.33); ctx.lineTo(r, r * 0.33);
-  ctx.stroke();
-  circle(0, 0, r * 0.58, T.main, T.dark, 2);                    // team roof
-
-  if (t.king) {
-    drawCrown(0, 1, r * 0.4, "#ffd34d", "#a8852a");
-    if (!t.active) {                                            // sleeping
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 13px Segoe UI";
-      ctx.textAlign = "center";
-      const dz = Math.sin(gt * 2) * 2;
-      ctx.fillText("z", r * 0.55, -r * 0.75 + dz);
-      ctx.font = "bold 17px Segoe UI";
-      ctx.fillText("Z", r * 0.95, -r * 1.05 - dz);
-    }
-  } else {
-    circle(0, 0, r * 0.2, "#ffd34d", "#a8852a", 1.5);           // turret gem
+  for (const t of towers) {
+    if (t.mesh.userData.zz) t.mesh.userData.zz.visible = !t.active;
+    t.barGrp.position.set(wx(t.x), t.mesh.userData.h, wz(t.y));
+    t.barGrp.userData.fill.scale.x = Math.max(0.01, t.barGrp.userData.w * (t.hp / t.maxHp));
   }
 
-  ctx.restore();
-  drawHpBar(t);
-}
-
-function drawProjectile(p) {
-  const a = Math.atan2(p.target.y - p.y, p.target.x - p.x);
-  ctx.save();
-  ctx.translate(p.x, p.y);
-  ctx.rotate(a);
-  switch (p.kind) {
-    case "arrow":
-      ctx.strokeStyle = "#8a5a2b"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(5, 0); ctx.stroke();
-      poly([[9, 0], [3, -2.6], [3, 2.6]], "#d8dde6");
-      poly([[-7, 0], [-10, -2.4], [-8, 0], [-10, 2.4]], "#e0e6ee"); // fletching
-      break;
-    case "fire":
-      ell(-6, 0, 6, 2.6, 0, "rgba(255,140,40,0.5)");            // trail
-      circle(0, 0, 5.2, "#ff8c28");
-      circle(1.2, 0, 2.8, "#ffe28a");
-      break;
-    case "bolt":
-      ell(-4, 0, 5, 2, 0, "rgba(180,215,255,0.5)");
-      ell(0, 0, 5.5, 2.4, 0, "#cfe4ff");
-      circle(1, 0, 1.6, "#fff");
-      break;
-    default: // bullet
-      ell(-5, 0, 4.5, 1.6, 0, "rgba(255,211,77,0.45)");
-      circle(0, 0, 3, "#ffd34d", "#b8922a", 1);
-  }
-  ctx.restore();
-}
-
-function drawHpBar(e) {
-  const w = e.radius * 2.2, h = 5;
-  const x = e.x - w / 2, y = e.y - e.radius - 12;
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = e.side === "player" ? "#4da3ff" : "#ff5b5b";
-  ctx.fillRect(x, y, w * Math.max(0, e.hp / e.maxHp), h);
-}
-
-// ---------------------------------------------------------------- scene
-function draw() {
-  // grass
-  ctx.fillStyle = "#4f9e44";
-  ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = "rgba(0,0,0,0.06)";
-  for (let i = 0; i < H / 40; i++) if (i % 2) ctx.fillRect(0, i * 40, W, 40);
-
-  // deploy zone hint
-  if (selectedSlot >= 0 && !CARDS[player.hand[selectedSlot]].spell) {
-    ctx.fillStyle = "rgba(80,150,255,0.16)";
-    ctx.fillRect(0, RIVER_Y + RIVER_H / 2, W, H - RIVER_Y - RIVER_H / 2);
+  for (const p of projectiles) {
+    const h = p.target.flying ? 2.2 : 1.4;
+    p.mesh.position.set(wx(p.x), h, wz(p.y));
+    if (p.kind === "arrow") p.mesh.lookAt(wx(p.target.x), p.target.flying ? 2.2 : 1.2, wz(p.target.y));
   }
 
-  // river with drifting highlights
-  ctx.fillStyle = "#3b6fd4";
-  ctx.fillRect(0, RIVER_Y - RIVER_H / 2, W, RIVER_H);
-  for (let i = 0; i < 5; i++) {
-    const wx = ((gt * 22 + i * 130) % (W + 60)) - 30;
-    ell(wx, RIVER_Y - 8 + (i % 3) * 8, 16, 2.2, 0, "rgba(255,255,255,0.18)");
-  }
-
-  // bridges
-  for (const bx of BRIDGES) {
-    ctx.fillStyle = "#b08a52";
-    ctx.fillRect(bx - BRIDGE_W / 2, RIVER_Y - RIVER_H / 2 - 4, BRIDGE_W, RIVER_H + 8);
-    ctx.strokeStyle = "rgba(0,0,0,0.25)";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(bx - BRIDGE_W / 2, RIVER_Y - RIVER_H / 2 - 4, BRIDGE_W, RIVER_H + 8);
-    ctx.strokeStyle = "rgba(0,0,0,0.12)";                       // planks
-    ctx.beginPath();
-    for (let px = bx - BRIDGE_W / 2 + 9; px < bx + BRIDGE_W / 2; px += 9) {
-      ctx.moveTo(px, RIVER_Y - RIVER_H / 2 - 4);
-      ctx.lineTo(px, RIVER_Y + RIVER_H / 2 + 4);
-    }
-    ctx.stroke();
-  }
-
-  for (const t of towers) drawTower(t);
-
-  // units: ground first, flyers on top
-  for (const u of units) if (!u.flying) drawUnit(u);
-  for (const u of units) if (u.flying) drawUnit(u);
-
-  for (const p of projectiles) drawProjectile(p);
-
-  // effects
   for (const f of effects) {
-    const a = f.life / f.maxLife;
-    if (f.ring) {
-      ctx.strokeStyle = `rgba(${f.color},${0.8 * a})`;
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.arc(f.x, f.y, f.r * (1.6 - 0.6 * a), 0, Math.PI * 2);
-      ctx.stroke();
-    } else {
-      ctx.fillStyle = `rgba(${f.color},${0.5 * a})`;
-      ctx.beginPath();
-      ctx.arc(f.x, f.y, f.r * (1.3 - 0.3 * a), 0, Math.PI * 2);
-      ctx.fill();
-    }
+    f.life -= dt;
+    const a = Math.max(0, f.life / f.maxLife);
+    f.mesh.material.opacity = a * f.baseOp;
+    f.mesh.scale.multiplyScalar(1 + f.grow * dt);
+    if (f.life <= 0) scene.remove(f.mesh);
   }
+  effects = effects.filter(f => f.life > 0);
 }
 
+// ---------------------------------------------------------------- HUD
 function drawHud() {
   const m = Math.floor(Math.max(0, timeLeft) / 60);
   const s = Math.floor(Math.max(0, timeLeft) % 60);
@@ -904,8 +1003,9 @@ function frame(ts) {
   lastTs = ts;
   gt += dt;
   update(dt);
-  draw();
+  syncVisuals(dt);
   drawHud();
+  renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 
