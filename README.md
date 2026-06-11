@@ -6,6 +6,8 @@ A fan made mini Clash Royale clone that runs entirely in the browser. One HTML f
 
 Open `index.html` in any modern browser, or play the hosted version via GitHub Pages once enabled.
 
+All characters are original artwork drawn and animated procedurally on the canvas, walk cycles, attack swings, fire breath, muzzle flashes, no image assets and no extracted game files.
+
 ## How it works
 
 You and an AI opponent each defend two princess towers and a king tower. Deploy troops on your half of the arena, manage your elixir, and destroy more towers than the enemy before the 3 minute clock runs out.
